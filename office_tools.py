@@ -5,15 +5,26 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
+from docx import Document
+from pptx import Presentation
+from pypdf import PdfReader
 
 
-SUPPORTED_EXTENSIONS = {".xlsx", ".xls", ".csv"}
+TABLE_EXTENSIONS = {".xlsx", ".xls", ".csv"}
+DOCUMENT_EXTENSIONS = {".docx", ".txt", ".md"}
+PRESENTATION_EXTENSIONS = {".pptx"}
+PDF_EXTENSIONS = {".pdf"}
+SUPPORTED_EXTENSIONS = TABLE_EXTENSIONS | DOCUMENT_EXTENSIONS | PRESENTATION_EXTENSIONS | PDF_EXTENSIONS
 
 
 @dataclass
 class TaskResult:
     message: str
     output_path: Path | None = None
+
+
+def supported_file_types() -> str:
+    return ", ".join(sorted(SUPPORTED_EXTENSIONS))
 
 
 def is_supported_file(path: Path) -> bool:
@@ -25,15 +36,34 @@ def run_office_task(file_path: Path, instruction: str, output_dir: Path) -> Task
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if not is_supported_file(file_path):
-        return TaskResult("Bu fayl tipi hələ dəstəklənmir. Hazırda `.xlsx`, `.xls`, `.csv` qəbul edirəm.")
+        return TaskResult(f"Bu fayl tipi hələ dəstəklənmir. Hazırda bunları qəbul edirəm: `{supported_file_types()}`.")
 
+    suffix = file_path.suffix.lower()
+    if suffix in TABLE_EXTENSIONS:
+        return _run_table_task(file_path, instruction, instruction_normalized, output_dir)
+    if suffix in DOCUMENT_EXTENSIONS:
+        return _run_text_document_task(file_path, instruction, instruction_normalized, output_dir)
+    if suffix in PRESENTATION_EXTENSIONS:
+        return _run_presentation_task(file_path, instruction, instruction_normalized, output_dir)
+    if suffix in PDF_EXTENSIONS:
+        return _run_pdf_task(file_path, instruction, instruction_normalized, output_dir)
+
+    return TaskResult(f"Bu fayl tipi hələ dəstəklənmir. Hazırda bunları qəbul edirəm: `{supported_file_types()}`.")
+
+
+def _run_table_task(
+    file_path: Path,
+    instruction: str,
+    instruction_normalized: str,
+    output_dir: Path,
+) -> TaskResult:
     if _wants_columns(instruction_normalized):
         df = _read_table(file_path)
         columns = "\n".join(f"- {column}" for column in df.columns)
         return TaskResult(f"Fayldakı sütunlar:\n{columns}")
 
     if _wants_summary(instruction_normalized):
-        return TaskResult(_summarize(file_path))
+        return TaskResult(_summarize_table(file_path))
 
     if _wants_excel(instruction_normalized):
         df = _read_table(file_path)
@@ -47,6 +77,10 @@ def run_office_task(file_path: Path, instruction: str, output_dir: Path) -> Task
         df.to_csv(output_path, index=False)
         return TaskResult("Faylı CSV formatına çevirdim.", output_path)
 
+    search_result = _try_search_text(_table_to_text(file_path), instruction, instruction_normalized)
+    if search_result:
+        return search_result
+
     filter_result = _try_filter(file_path, instruction, instruction_normalized, output_dir)
     if filter_result:
         return filter_result
@@ -55,11 +89,78 @@ def run_office_task(file_path: Path, instruction: str, output_dir: Path) -> Task
     if sort_result:
         return sort_result
 
-    return TaskResult(
-        "Tapşırığı tam başa düşmədim. Belə yaza bilərsiniz: "
-        "`xülasə ver`, `sütunları göstər`, `status = ödənilib filtr et`, "
-        "`məbləğ sütununa görə sırala`, `csv et`, `excel et`."
-    )
+    return _unknown_task_message(file_path)
+
+
+def _run_text_document_task(
+    file_path: Path,
+    instruction: str,
+    instruction_normalized: str,
+    output_dir: Path,
+) -> TaskResult:
+    text = _extract_document_text(file_path)
+
+    if _wants_txt(instruction_normalized) or _wants_extract_text(instruction_normalized):
+        output_path = output_dir / f"{file_path.stem}_text.txt"
+        output_path.write_text(text, encoding="utf-8")
+        return TaskResult("Sənəddəki mətni `.txt` faylına çıxardım.", output_path)
+
+    search_result = _try_search_text(text, instruction, instruction_normalized)
+    if search_result:
+        return search_result
+
+    if _wants_summary(instruction_normalized):
+        return TaskResult(_summarize_text_file(file_path, text))
+
+    return _unknown_task_message(file_path)
+
+
+def _run_presentation_task(
+    file_path: Path,
+    instruction: str,
+    instruction_normalized: str,
+    output_dir: Path,
+) -> TaskResult:
+    slides = _extract_presentation_slides(file_path)
+    text = "\n\n".join(f"Slayd {index}: {slide}" for index, slide in slides)
+
+    if _wants_txt(instruction_normalized) or _wants_extract_text(instruction_normalized):
+        output_path = output_dir / f"{file_path.stem}_slides_text.txt"
+        output_path.write_text(text, encoding="utf-8")
+        return TaskResult("Prezentasiyadakı mətni `.txt` faylına çıxardım.", output_path)
+
+    search_result = _try_search_text(text, instruction, instruction_normalized)
+    if search_result:
+        return search_result
+
+    if _wants_summary(instruction_normalized):
+        return TaskResult(_summarize_presentation(file_path, slides))
+
+    return _unknown_task_message(file_path)
+
+
+def _run_pdf_task(
+    file_path: Path,
+    instruction: str,
+    instruction_normalized: str,
+    output_dir: Path,
+) -> TaskResult:
+    pages = _extract_pdf_pages(file_path)
+    text = "\n\n".join(f"Səhifə {index}: {page}" for index, page in pages)
+
+    if _wants_txt(instruction_normalized) or _wants_extract_text(instruction_normalized):
+        output_path = output_dir / f"{file_path.stem}_pdf_text.txt"
+        output_path.write_text(text, encoding="utf-8")
+        return TaskResult("PDF-dəki mətni `.txt` faylına çıxardım.", output_path)
+
+    search_result = _try_search_text(text, instruction, instruction_normalized)
+    if search_result:
+        return search_result
+
+    if _wants_summary(instruction_normalized):
+        return TaskResult(_summarize_pages(file_path, pages, "Səhifə sayı"))
+
+    return _unknown_task_message(file_path)
 
 
 def _read_table(file_path: Path) -> pd.DataFrame:
@@ -69,10 +170,11 @@ def _read_table(file_path: Path) -> pd.DataFrame:
     return pd.read_excel(file_path)
 
 
-def _summarize(file_path: Path) -> str:
+def _summarize_table(file_path: Path) -> str:
     df = _read_table(file_path)
     lines = [
         f"Fayl: `{file_path.name}`",
+        f"Tip: cədvəl",
         f"Sətir sayı: {len(df)}",
         f"Sütun sayı: {len(df.columns)}",
         "",
@@ -86,9 +188,7 @@ def _summarize(file_path: Path) -> str:
         lines.append("Rəqəmsal sütunların qısa statistikası:")
         stats = df[numeric_columns].describe().round(2).transpose()
         for column, row in stats.iterrows():
-            lines.append(
-                f"- {column}: min={row['min']}, max={row['max']}, orta={row['mean']}"
-            )
+            lines.append(f"- {column}: min={row['min']}, max={row['max']}, orta={row['mean']}")
 
     missing = df.isna().sum()
     missing = missing[missing > 0]
@@ -98,6 +198,102 @@ def _summarize(file_path: Path) -> str:
         lines.extend(f"- {column}: {count}" for column, count in missing.items())
 
     return "\n".join(lines)
+
+
+def _extract_document_text(file_path: Path) -> str:
+    suffix = file_path.suffix.lower()
+    if suffix == ".docx":
+        document = Document(file_path)
+        paragraphs = [paragraph.text for paragraph in document.paragraphs if paragraph.text.strip()]
+
+        for table in document.tables:
+            for row in table.rows:
+                cells = [cell.text.strip() for cell in row.cells if cell.text.strip()]
+                if cells:
+                    paragraphs.append(" | ".join(cells))
+
+        return "\n".join(paragraphs)
+
+    return file_path.read_text(encoding="utf-8", errors="ignore")
+
+
+def _extract_presentation_slides(file_path: Path) -> list[tuple[int, str]]:
+    presentation = Presentation(file_path)
+    slides: list[tuple[int, str]] = []
+
+    for index, slide in enumerate(presentation.slides, start=1):
+        parts: list[str] = []
+        for shape in slide.shapes:
+            if hasattr(shape, "text") and shape.text.strip():
+                parts.append(shape.text.strip())
+        slides.append((index, "\n".join(parts)))
+
+    return slides
+
+
+def _extract_pdf_pages(file_path: Path) -> list[tuple[int, str]]:
+    reader = PdfReader(str(file_path))
+    pages: list[tuple[int, str]] = []
+
+    for index, page in enumerate(reader.pages, start=1):
+        pages.append((index, page.extract_text() or ""))
+
+    return pages
+
+
+def _summarize_text_file(file_path: Path, text: str) -> str:
+    paragraphs = [line for line in text.splitlines() if line.strip()]
+    preview = _preview_text(text)
+    return "\n".join(
+        [
+            f"Fayl: `{file_path.name}`",
+            "Tip: sənəd",
+            f"Sətir/abzas sayı: {len(paragraphs)}",
+            f"Söz sayı: {_word_count(text)}",
+            "",
+            "İlk hissə:",
+            preview or "Mətn tapılmadı.",
+        ]
+    )
+
+
+def _summarize_presentation(file_path: Path, slides: list[tuple[int, str]]) -> str:
+    non_empty_slides = [(index, text) for index, text in slides if text.strip()]
+    lines = [
+        f"Fayl: `{file_path.name}`",
+        "Tip: prezentasiya",
+        f"Slayd sayı: {len(slides)}",
+        f"Mətn olan slayd sayı: {len(non_empty_slides)}",
+        "",
+        "Slaydlar:",
+    ]
+
+    for index, text in non_empty_slides[:10]:
+        lines.append(f"- Slayd {index}: {_single_line_preview(text)}")
+
+    if len(non_empty_slides) > 10:
+        lines.append(f"- ... daha {len(non_empty_slides) - 10} slayd")
+
+    return "\n".join(lines)
+
+
+def _summarize_pages(file_path: Path, pages: list[tuple[int, str]], count_label: str) -> str:
+    text = "\n".join(page_text for _, page_text in pages)
+    lines = [
+        f"Fayl: `{file_path.name}`",
+        "Tip: PDF",
+        f"{count_label}: {len(pages)}",
+        f"Söz sayı: {_word_count(text)}",
+        "",
+        "İlk hissə:",
+        _preview_text(text) or "Mətn tapılmadı. PDF skan şəklində ola bilər.",
+    ]
+    return "\n".join(lines)
+
+
+def _table_to_text(file_path: Path) -> str:
+    df = _read_table(file_path)
+    return df.astype(str).to_string(index=False)
 
 
 def _try_sort(
@@ -147,6 +343,38 @@ def _try_filter(
     return TaskResult(f"`{column}` = `{value}` olan {len(filtered)} sətir tapdım.", output_path)
 
 
+def _try_search_text(text: str, instruction: str, instruction_normalized: str) -> TaskResult | None:
+    if "axtar" not in instruction_normalized and "tap" not in instruction_normalized and "search" not in instruction_normalized:
+        return None
+
+    query = _extract_search_query(instruction)
+    if not query:
+        return TaskResult("Axtarılacaq sözü tapa bilmədim. Məsələn: `müştəri sözünü axtar`.")
+
+    matches = []
+    query_normalized = _normalize(query)
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        if query_normalized in _normalize(line):
+            matches.append((line_number, line.strip()))
+
+    if not matches:
+        return TaskResult(f"`{query}` üçün nəticə tapılmadı.")
+
+    lines = [f"`{query}` üçün {len(matches)} nəticə tapdım:"]
+    for line_number, line in matches[:20]:
+        lines.append(f"- Sətir {line_number}: {_single_line_preview(line, 160)}")
+    if len(matches) > 20:
+        lines.append(f"- ... daha {len(matches) - 20} nəticə")
+
+    return TaskResult("\n".join(lines))
+
+
+def _extract_search_query(instruction: str) -> str:
+    cleaned = re.sub(r"\b(axtar|tap|search|sozunu|sözünü|metnini|mətnini)\b", " ", instruction, flags=re.I)
+    cleaned = cleaned.replace("`", "").replace('"', "").replace("'", "")
+    return " ".join(cleaned.split()).strip()
+
+
 def _find_column(df: pd.DataFrame, text: str) -> str | None:
     text_normalized = _normalize(text)
     normalized_columns = {_normalize(str(column)): str(column) for column in df.columns}
@@ -162,8 +390,22 @@ def _find_column(df: pd.DataFrame, text: str) -> str | None:
     return None
 
 
+def _unknown_task_message(file_path: Path) -> TaskResult:
+    suffix = file_path.suffix.lower()
+    if suffix in TABLE_EXTENSIONS:
+        examples = "`xülasə ver`, `sütunları göstər`, `status = ödənilib filtr et`, `məbləğ sütununa görə sırala`, `csv et`"
+    elif suffix in PRESENTATION_EXTENSIONS:
+        examples = "`xülasə ver`, `mətni çıxart`, `müştəri sözünü axtar`"
+    elif suffix in PDF_EXTENSIONS:
+        examples = "`xülasə ver`, `mətni çıxart`, `müqavilə sözünü axtar`"
+    else:
+        examples = "`xülasə ver`, `mətni çıxart`, `müştəri sözünü axtar`"
+
+    return TaskResult(f"Tapşırığı tam başa düşmədim. Bu fayl üçün belə yaza bilərsiniz: {examples}.")
+
+
 def _wants_summary(instruction: str) -> bool:
-    return any(word in instruction for word in ["xulase", "summary", "analiz", "hesabat"])
+    return any(word in instruction for word in ["xulase", "summary", "analiz", "hesabat", "melumat"])
 
 
 def _wants_columns(instruction: str) -> bool:
@@ -176,6 +418,32 @@ def _wants_csv(instruction: str) -> bool:
 
 def _wants_excel(instruction: str) -> bool:
     return any(word in instruction for word in ["excel", "xlsx"])
+
+
+def _wants_txt(instruction: str) -> bool:
+    return any(word in instruction for word in ["txt", "text", "metn", "metin"])
+
+
+def _wants_extract_text(instruction: str) -> bool:
+    return any(phrase in instruction for phrase in ["metni cixart", "metn cixart", "extract"])
+
+
+def _word_count(text: str) -> int:
+    return len(re.findall(r"\w+", text, flags=re.UNICODE))
+
+
+def _preview_text(text: str, limit: int = 900) -> str:
+    compact = " ".join(text.split())
+    if len(compact) <= limit:
+        return compact
+    return compact[: limit - 3].rstrip() + "..."
+
+
+def _single_line_preview(text: str, limit: int = 120) -> str:
+    compact = " ".join(text.split())
+    if len(compact) <= limit:
+        return compact
+    return compact[: limit - 3].rstrip() + "..."
 
 
 def _normalize(text: str) -> str:
