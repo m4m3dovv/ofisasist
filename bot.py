@@ -15,7 +15,7 @@ from telegram.ext import (
     filters,
 )
 
-from office_tools import is_supported_file, run_office_task
+from office_tools import is_supported_file, run_office_task, supported_file_types
 
 
 load_dotenv()
@@ -32,11 +32,13 @@ DATA_DIR = Path(os.getenv("BOT_DATA_DIR", "data"))
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "Salam! Mən ofis işləri üçün köməkçi botam.\n\n"
-        "Excel və ya CSV faylı göndərin, sonra tapşırıq yazın. Məsələn:\n"
+        "Excel, Word, PowerPoint, PDF, CSV və ya mətn faylı göndərin, sonra tapşırıq yazın. Məsələn:\n"
         "- xülasə ver\n"
         "- sütunları göstər\n"
         "- status = ödənilib filtr et\n"
         "- məbləğ sütununa görə sırala\n"
+        "- mətni çıxart\n"
+        "- müqavilə sözünü axtar\n"
         "- csv et"
     )
 
@@ -53,7 +55,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     file_path = chat_dir / file_name
 
     if not is_supported_file(file_path):
-        await message.reply_text("Bu fayl tipi hələ dəstəklənmir. `.xlsx`, `.xls` və ya `.csv` göndərin.")
+        await message.reply_text(f"Bu fayl tipi hələ dəstəklənmir. Bunlardan birini göndərin: `{supported_file_types()}`.")
         return
 
     await message.chat.send_action(ChatAction.UPLOAD_DOCUMENT)
@@ -65,7 +67,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await _run_task(update, context, message.caption)
     else:
         await message.reply_text(
-            "Faylı aldım. İndi nə etməyimi yazın. Məsələn: `xülasə ver` və ya `sütunları göstər`."
+            "Faylı aldım. İndi nə etməyimi yazın. Məsələn: `xülasə ver`, `mətni çıxart` və ya `sözünü axtar`."
         )
 
 
@@ -84,7 +86,7 @@ async def _run_task(update: Update, context: ContextTypes.DEFAULT_TYPE, instruct
 
     latest_file = context.user_data.get("latest_file")
     if not latest_file:
-        await message.reply_text("Əvvəlcə Excel və ya CSV faylı göndərin, sonra tapşırığı yazın.")
+        await message.reply_text("Əvvəlcə ofis faylı göndərin, sonra tapşırığı yazın.")
         return
 
     file_path = Path(latest_file)
@@ -126,4 +128,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
