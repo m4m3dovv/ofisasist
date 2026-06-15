@@ -39,7 +39,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "- məbləğ sütununa görə sırala\n"
         "- mətni çıxart\n"
         "- müqavilə sözünü axtar\n"
-        "- csv et"
+        "- bu CV-ni analiz et\n"
+        "- bu müqavilədə riskləri tap\n"
+        "- csv et\n\n"
+        "Sərbəst AI tapşırıqları üçün kompüterdə Ollama işləməlidir."
     )
 
 
