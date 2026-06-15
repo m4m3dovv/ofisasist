@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -8,6 +9,8 @@ import pandas as pd
 from docx import Document
 from pptx import Presentation
 from pypdf import PdfReader
+
+from local_ai import ask_local_ai
 
 
 TABLE_EXTENSIONS = {".xlsx", ".xls", ".csv"}
@@ -89,7 +92,7 @@ def _run_table_task(
     if sort_result:
         return sort_result
 
-    return _unknown_task_message(file_path)
+    return _try_local_ai_or_help(file_path, instruction, _table_to_text(file_path))
 
 
 def _run_text_document_task(
@@ -112,7 +115,7 @@ def _run_text_document_task(
     if _wants_summary(instruction_normalized):
         return TaskResult(_summarize_text_file(file_path, text))
 
-    return _unknown_task_message(file_path)
+    return _try_local_ai_or_help(file_path, instruction, text)
 
 
 def _run_presentation_task(
@@ -136,7 +139,7 @@ def _run_presentation_task(
     if _wants_summary(instruction_normalized):
         return TaskResult(_summarize_presentation(file_path, slides))
 
-    return _unknown_task_message(file_path)
+    return _try_local_ai_or_help(file_path, instruction, text)
 
 
 def _run_pdf_task(
@@ -146,6 +149,8 @@ def _run_pdf_task(
     output_dir: Path,
 ) -> TaskResult:
     pages = _extract_pdf_pages(file_path)
+    if _pages_are_empty(pages):
+        pages = _extract_pdf_pages_with_ocr(file_path)
     text = "\n\n".join(f"Səhifə {index}: {page}" for index, page in pages)
 
     if _wants_txt(instruction_normalized) or _wants_extract_text(instruction_normalized):
@@ -160,7 +165,7 @@ def _run_pdf_task(
     if _wants_summary(instruction_normalized):
         return TaskResult(_summarize_pages(file_path, pages, "Səhifə sayı"))
 
-    return _unknown_task_message(file_path)
+    return _try_local_ai_or_help(file_path, instruction, text)
 
 
 def _read_table(file_path: Path) -> pd.DataFrame:
@@ -237,6 +242,28 @@ def _extract_pdf_pages(file_path: Path) -> list[tuple[int, str]]:
 
     for index, page in enumerate(reader.pages, start=1):
         pages.append((index, page.extract_text() or ""))
+
+    return pages
+
+
+def _extract_pdf_pages_with_ocr(file_path: Path) -> list[tuple[int, str]]:
+    if shutil.which("tesseract") is None:
+        return []
+
+    try:
+        import fitz
+        import pytesseract
+        from PIL import Image
+    except ImportError:
+        return []
+
+    pages: list[tuple[int, str]] = []
+    document = fitz.open(file_path)
+    for index, page in enumerate(document, start=1):
+        pixmap = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+        image = Image.frombytes("RGB", [pixmap.width, pixmap.height], pixmap.samples)
+        text = pytesseract.image_to_string(image, lang="aze+eng")
+        pages.append((index, text.strip()))
 
     return pages
 
@@ -369,6 +396,15 @@ def _try_search_text(text: str, instruction: str, instruction_normalized: str) -
     return TaskResult("\n".join(lines))
 
 
+def _try_local_ai_or_help(file_path: Path, instruction: str, file_text: str) -> TaskResult:
+    ai_result = ask_local_ai(instruction, file_path.name, file_text)
+    if ai_result.ok:
+        return TaskResult(ai_result.message)
+
+    help_message = _unknown_task_message(file_path).message
+    return TaskResult(f"{help_message}\n\nLokal AI qeydi: {ai_result.message}")
+
+
 def _extract_search_query(instruction: str) -> str:
     cleaned = re.sub(r"\b(axtar|tap|search|sozunu|sözünü|metnini|mətnini)\b", " ", instruction, flags=re.I)
     cleaned = cleaned.replace("`", "").replace('"', "").replace("'", "")
@@ -401,7 +437,15 @@ def _unknown_task_message(file_path: Path) -> TaskResult:
     else:
         examples = "`xülasə ver`, `mətni çıxart`, `müştəri sözünü axtar`"
 
-    return TaskResult(f"Tapşırığı tam başa düşmədim. Bu fayl üçün belə yaza bilərsiniz: {examples}.")
+    return TaskResult(
+        "Tapşırığı hazır qaydalarla tam başa düşmədim. "
+        f"Bu fayl üçün belə yaza bilərsiniz: {examples}. "
+        "Daha sərbəst tapşırıqlar üçün Ollama lokal AI aktiv olmalıdır."
+    )
+
+
+def _pages_are_empty(pages: list[tuple[int, str]]) -> bool:
+    return _word_count("\n".join(text for _, text in pages)) == 0
 
 
 def _wants_summary(instruction: str) -> bool:
@@ -468,4 +512,3 @@ def _normalize(text: str) -> str:
     for original, replacement in replacements.items():
         lowered = lowered.replace(original, replacement)
     return lowered
-
